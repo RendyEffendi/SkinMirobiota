@@ -1,0 +1,242 @@
+library(phyloseq)
+library(vegan)
+library(haven)
+library(dplyr)
+library(ggplot2)
+library(decontam)
+library("writexl")
+#open phyloseq
+physeq_skin <- readRDS("physeq_data_recoded.rds")
+physeq_skin
+
+#check frequencies before filtering
+tax <- data.frame(physeq_skin@tax_table)
+genus <- table(tax$Genus)
+phyla <- table(tax$Phylum)
+dim(tax) 
+dim(genus) 
+dim(phyla) 
+
+# Check number of reads 
+ASV <- colnames(physeq_skin@otu_table)  
+samples <- rownames(physeq_skin@otu_table)  
+ASVcounts <- colSums(physeq_skin@otu_table) # countdata per ASV
+samplecounts <- rowSums(physeq_skin@otu_table) #count data per sample
+overviewASV <- as.data.frame(cbind(ASV, ASVcounts))
+View(overviewASV) #Sort counts to see overview
+overviewASV$ASVcounts <- as.numeric(overviewASV$ASVcounts)
+sum(overviewASV$ASVcounts) 
+overviewSamples <- as.data.frame(cbind(samples, samplecounts))
+View(overviewSamples) 
+overviewSamples$samplecounts <- as.numeric(overviewSamples$samplecounts)
+sum(overviewSamples$samplecounts) #total number of reads
+hist(overviewSamples$samplecounts) 
+summary(overviewSamples$samplecounts) 
+
+#### FILTERING####
+# Decontam with the combined function
+# Cut-offs for reads
+# ASV prevalence
+
+## Decontam:
+# A. Check library sizes (# of reads in each sample) 
+# number of reads as a function of whether the sample was a true positive control or a negative control
+df <- as.data.frame(sample_data(physeq_skin)) # Put sample_data into a ggplot-friendly data.frame. sample ID = rows
+df$LibrarySize <- sample_sums(physeq_skin) # equivalent to rowSums/colSums with otu orientation, gives total # of reads per sample 
+df <- df[order(df$LibrarySize),]
+#adjust order on the legend
+df$Sample_or_Control <- factor(df$Sample_or_Control, levels = c("True Sample", "Control Sample"))
+df$Index <- seq(nrow(df)) # sequence order of samples in order of library size
+ggplot(data=df, aes(x=Index, y=LibrarySize, color=Sample_or_Control)) + geom_point() 
+summary(sample_data(physeq_skin)$DNA.concentration)
+
+# Decontam
+sum(is.na(physeq_skin@sam_data$DNA.concentration))
+check <- rownames(sample_data(physeq_skin))[is.na(sample_data(physeq_skin)$DNA.concentration)]  
+physeq_no_NA <- subset_samples(physeq_skin, !is.na(DNA.concentration)) 
+sample_data(physeq_no_NA)$is.neg <- sample_data(physeq_no_NA)$Sample_or_Control == "Control Sample"
+table(sample_data(physeq_no_NA)$Sample_or_Control) # will show amount of negative controls and true samples
+
+# Check thresholds separately for prevalence and frequency methods in decontam
+#### Evaluation with histograms (stricter threshold results in same histograms)
+contamdf.prev <- isContaminant(physeq_no_NA, method="prevalence", neg="is.neg")
+# prevalence 
+summary(contamdf.prev$prev)
+contamdf.prev$prev <- as.numeric(contamdf.prev$prev)
+contamdf.prev$prev.fac <- as.factor(ifelse(contamdf.prev$prev < 6, '<6',
+                                           ifelse(contamdf.prev$prev < 9, '<9',
+                                                  ifelse(contamdf.prev$prev < 18, '<18',
+                                                         '18+'))))
+
+
+ggplot(contamdf.prev, aes(x = p.prev, fill = prev.fac)) +
+  geom_histogram(binwidth = 0.1, color = "black") +
+  scale_fill_manual(values = c("#C7E9C0", "#5CBF00", "#238B45", "#004D00")) +
+  labs(x = "Decontam Score", y = "ASV Prevalence") +
+  theme_minimal() +
+  coord_cartesian(ylim = c(0, 1000)) 
+
+# evaluation of frequency scores
+contamdf.freq <- isContaminant(physeq_no_NA, method="frequency", conc="DNA.concentration") 
+summary(contamdf.freq$prev)
+contamdf.freq$prev <- as.numeric(contamdf.freq$prev)
+contamdf.freq$prev.fac <- as.factor(ifelse(contamdf.freq$prev < 6, '<6',
+                                           ifelse(contamdf.freq$prev < 9, '<9',
+                                                  ifelse(contamdf.freq$prev < 18, '<18',
+                                                         '18+'))))
+ggplot(contamdf.freq, aes(x = p.freq, fill = prev.fac)) +
+  geom_histogram(binwidth = 0.1, color = "black") +
+  scale_fill_manual(values = c("#A2D729", "#5CBF00", "#008000", "#004D00")) +
+  labs(x = "Decontam Score", y = "ASV Prevalence") +
+  theme_minimal() +
+  coord_cartesian(ylim = c(0, 1000)) 
+
+#evaluation of combined
+contamdf.comb <- isContaminant(physeq_no_NA, neg = "is.neg", conc="DNA.concentration", 
+                                 method="combined") 
+summary(contamdf.comb$prev)
+contamdf.comb$prev <- as.numeric(contamdf.comb$prev)
+contamdf.comb$prev.fac <- as.factor(ifelse(contamdf.comb$prev < 6, '< 6',
+                                             ifelse(contamdf.comb$prev < 9, '<9',
+                                                    ifelse(contamdf.comb$prev < 18, '<18',
+                                                           '18+'))))
+#  plot to evaluate combined method
+ggplot(contamdf.comb, aes(x = p.freq, fill = prev.fac)) +
+  geom_histogram(binwidth = 0.1, color = "black") +
+  scale_fill_manual(values = c("#A2D729", "#5CBF00", "#008000", "#004D00")) +
+  labs(x = "Decontam Score", y = "ASV Prevalence") +
+  theme_minimal() +
+  coord_cartesian(ylim = c(0, 1000)) 
+
+# Chose method with the cleanest bimodal distribution
+# Explanations about bimodal distributions: https://microbiomejournal.biomedcentral.com/articles/10.1186/s40168-018-0605-2 
+contamdf.prev045 <- isContaminant(physeq_no_NA, method="prevalence", neg="is.neg", threshold = 0.45)
+table(contamdf.prev045$contaminant) #ASVs identified as contaminants 
+prev.contam <- which(contamdf.prev045$contaminant) # list of numbers, to couple with tax table to explore the identified ASVS
+TAX <- physeq_no_NA@tax_table
+TAX <- as.data.frame(TAX)
+TAX1 <- TAX
+rownames(TAX1) <- gsub("^ASV", "", rownames(TAX1))
+contamdf.prev045.tax <- TAX1[prev.contam, ] 
+write_xlsx(contamdf.prev045.tax, "taxotu_prev_045.xlsx") #identified contaminants saved in excel
+
+# check visually:
+# frequency method:
+set.seed(100)
+# prevalence method:
+physeq_skin.pa <- transform_sample_counts(physeq_no_NA, function(abund) 1*(abund>0))
+physeq_skin.pa.neg <- prune_samples(sample_data(physeq_skin.pa)$Sample_or_Control == "Control Sample", physeq_skin.pa)
+physeq_skin.pa.pos <- prune_samples(sample_data(physeq_skin.pa)$Sample_or_Control == "True Sample", physeq_skin.pa)
+# make data frame of prevalence 
+df.pa <- data.frame(pa.pos=taxa_sums(physeq_skin.pa.pos), pa.neg=taxa_sums(physeq_skin.pa.neg),
+                    contaminant=contamdf.prev045$contaminant)
+ggplot(data=df.pa, aes(x=pa.neg, y=pa.pos, color=contaminant)) + geom_point() +
+  xlab("Prevalence (Negative Controls)") + ylab("Prevalence (True Samples)")
+physeq_no_NA_noncontam <- prune_taxa(!contamdf.prev045$contaminant, physeq_no_NA)
+physeq_no_NA_noncontam 
+tax <- data.frame(physeq_no_NA_noncontam@tax_table)
+genus <- table(tax$Genus)
+phyla <- table(tax$Phylum)
+dim(tax) 
+dim(genus) 
+dim(phyla) 
+
+#### B. Filter based on number of reads
+library(data.table)
+sample_ids <- rownames(sample_data(physeq_no_NA_noncontam))
+readcount <- data.table(SampleID = sample_ids, 
+                        TotalReads = sample_sums(physeq_no_NA_noncontam))
+ggplot(readcount, aes(TotalReads)) + geom_histogram() + ggtitle("Sequencing Depth")
+summary(readcount)
+
+# Check samples with low number of reads
+head(readcount[order(readcount$TotalReads), c("SampleID", "TotalReads")]) 
+
+###Rarefaction curve: explore sequencing depth   
+#If the sequencing depth is enough --> a plateau 
+# Preparing data for rarefaction curve
+otu_table_skin <- otu_table(physeq_no_NA_noncontam)
+otu_table_skin_df <- as.data.frame(t(otu_table_skin))
+sample_names_skin <- rownames(otu_table_skin_df)
+# Generate rarefaction curves (vegan package)
+otu_rarecurve_skin <- rarecurve(otu_table_skin_df, step = 10000, label = TRUE)
+# Make a plot
+par(cex = 1, las = 1)
+leg.txt <- c("ASV", "K")
+lty_vector <- c(2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1)
+# Generate rarefaction curves
+rarecurve(otu_table_skin_df, 
+          step = 100, 
+          lwd = 1.3, 
+          xlab = "Number of reads", 
+          ylab = "Number of OTU observed", 
+          xlim = c(-50, 10000), 
+          ylim = c(-5, 400), 
+          label = FALSE, 
+          lty = lty_vector) 
+# Add a legend
+legend(15000, 3900, leg.txt, lty = c(2, 1), lwd = 1.3, box.lwd = 0.6, cex = 1)
+num_samples <- nrow(otu_table_skin_df)
+lty_vector <- rep(c(1, 2), length.out = num_samples)
+
+# Chose cut off to be add
+readcount$TotalReads<- as.numeric(readcount$TotalReads)
+dim(readcount[readcount$TotalReads >= 2000, ]) #amount of samples remain
+test <- readcount[readcount$TotalReads < 2000, ] # samples will be excluded 
+
+# prune samples based on threshold 
+sample_data(physeq_no_NA_noncontam)$TotalReads <- sample_sums(physeq_no_NA_noncontam)
+ps.filtered <- prune_samples(sample_data(physeq_no_NA_noncontam)$TotalReads>= 2000, physeq_no_NA_noncontam)
+table(sample_data(ps.filtered)$Sample_or_Control)
+summary(sample_data(ps.filtered)$TotalReads) 
+
+#delete negative controls
+ps.filtered <- prune_samples(sample_data(ps.filtered)$Sample_or_Control == "True Sample", ps.filtered)
+ps.filtered 
+
+#save phyloseq after filtering 
+saveRDS(ps.filtered, 'ps_afterreads.rds')
+ps.filtered <- readRDS('ps_afterreads.rds') 
+
+
+## filter based on ASV prevalence
+# threshold 2000 reads: so 311*0.2 = 62 samples  
+# Extract the abundance matrix from the phyloseq object
+# threshold 2000 reads 
+abundance_matrix <- t(as.matrix(otu_table(ps.filtered)))
+# Create a new dataframe
+sample_counts_df <- data.frame(
+  Taxa = rownames(abundance_matrix),
+  Sample_Count = apply(abundance_matrix > 0, 1, sum))
+View(sample_counts_df)
+
+# prevalence at 20% with minimum 2000 reads
+exclude <- sample_counts_df[sample_counts_df$Sample_Count < 62, ]
+View(exclude)
+
+sample_counts_df2 <- sample_counts_df[sample_counts_df$Sample_Count >= 62, ]
+include_asv <- as.vector(sample_counts_df2$Taxa)
+include_asv1 <- gsub("^ASV", "", include_asv)
+check_include <- TAX1[include_asv1, ] 
+exclude_asv <- as.vector(exclude$Taxa) 
+exclude_asv1 <- gsub("^ASV", "", exclude_asv) 
+check_exclude <- TAX1[exclude_asv1, ] 
+# saved excel tables 
+write_xlsx(check_include, "includedasv_prevalence20.xlsx") 
+write_xlsx(check_exclude, "excludedasv_prevalence20.xlsx") 
+ 
+
+# Subset the phyloseq object based on the ASV IDs
+ps.filter.prev <- prune_taxa(include_asv, ps.filtered)
+tax <- data.frame(ps.filter.prev@tax_table)
+genus <- table(tax$Genus)
+phyla <- table(tax$Phylum)
+dim(tax) 
+dim(genus) 
+dim(phyla) 
+
+View(sample_data(ps.filter.prev))
+hist(sample_data(ps.filter.prev)$TotalReads) 
+sample_data(ps.filter.prev)$TotalReads_log <- log(sample_data(ps.filter.prev)$TotalReads)
+hist(sample_data(ps.filter.prev)$TotalReads_log)
+
